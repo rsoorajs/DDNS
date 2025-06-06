@@ -335,7 +335,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: docker-${{ contains(matrix.os,'arm') && 'arm' || 'amd' }}
-          path: "*.tar"
+          path: multi-platform-image.tar
           if-no-files-found: error
           retention-days: ${{ github.event_name == 'push' && 7 || 3 }}
 
@@ -363,17 +363,25 @@ jobs:
     if: github.event_name == 'push'
     needs: [lint, docker, python]
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 60
     environment:
       name: preview
       url: https://github.com/NewFuture/DDNS/pkgs/container/ddns/?tag=master
     permissions:
       packages: write
     env:
-      platforms: linux/386,linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64/v8,linux/ppc64le,linux/riscv64,linux/s390x
+      platforms: linux/ppc64le,linux/riscv64,linux/s390x
     steps:
       - uses: actions/checkout@v4
       - run: sed -i -e "s#\${BUILD_VERSION}#${{ github.ref_name }}#" -e "s/\${BUILD_DATE}/$(date --iso-8601=seconds)/" run.py
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-amd
+          path: docker-amd
+      - uses: actions/download-artifact@v4
+        with:
+          name: docker-arm
+          path: docker-arm
       - uses: docker/setup-qemu-action@v3
         with:
           platforms: ${{ env.platforms }}
@@ -401,7 +409,28 @@ jobs:
           context: .
           file: .build/Dockerfile
           platforms: ${{ env.platforms }}
-          push: true
+          push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           annotations: ${{ steps.meta.outputs.annotations }}
+          outputs: type=oci,dest=./multi-platform-extra.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docker-extra
+          path: multi-platform-extra.tar
+          if-no-files-found: error
+
+      - name: Merge all platform images
+        run: |
+          mkdir -p arm-oci && tar -vxf docker-arm/multi-platform-image.tar -C arm-oci
+          mkdir -p amd-oci && tar -vxf docker-amd/multi-platform-image.tar -C amd-oci
+          mkdir -p ext-oci && tar -vxf multi-platform-extra.tar -C ext-oci  
+          docker buildx imagetools create
+            -t "newfuture/ddns:${{github.ref_name}}" \
+            -t "ghcr.io/newfuture/ddns:${{github.ref_name}}"
+            -f arm-oci/index.json \
+            -f amd-oci/index.json \
+            -f ext-oci/index.json \
+            --annotation "$DOCKER_METADATA_OUTPUT_ANNOTATIONS"
+        
